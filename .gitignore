@@ -10,3 +10,4 @@ nifi.tfvars
 *playbooks/registry/id_rsa.pub
 /playbooks/registry/id_rsa.pub
 .idea
+.DS_Store
