@@ -1,6 +1,7 @@
-# Nifi Dynamic Cluster project : Infrastructure as Code
+# Nifi Dynamic Cluster project : 
+## Infrastructure as Code
 
-This project gathers all the infrastructure as code and configuration management scripts for the RATP Dev Nifi project
+This project gathers all the infrastructure as code and configuration management scripts for the Dev Nifi project
 
 ## Architecture overview
 
