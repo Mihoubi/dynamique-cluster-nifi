@@ -69,7 +69,7 @@ The prominent components of Nifi are :
 + FlowFile repository - used by NiFi to maintain and track status of the currently active FlowFile Or the information that NiFi is helping move between systems.
 + Content repository - the data in transit is maintained here
 + Provenance repository - data relating to the provenance of the data flowing through the system is maintained here.
-  our nifi version is => 1.13.2 [here](https://cwiki.apache.org/confluence/display/NIFI/Release+Notes#ReleaseNotes-Version1.13.2)
+  our nifi version is => 1.18.0 [here](https://archive.apache.org/dist/nifi/1.18.0/nifi-1.18.0-bin.zip)
 
 ### Nifi Registry
 
