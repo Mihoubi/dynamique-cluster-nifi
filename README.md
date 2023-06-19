@@ -138,7 +138,6 @@ If you want to develop new features as Terraform modules, to edit an existing ar
 See detailed description of the security tools and policies [here]//./doc/security.md)
 
 
-
 ## Tips and tricks
 
 ###
