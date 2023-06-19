@@ -1,4 +1,4 @@
-# RATP PreProd Nifi project : Infrastructure as Code
+# Nifi Dynamic Cluster project : Infrastructure as Code
 
 This project gathers all the infrastructure as code and configuration management scripts for the RATP Dev Nifi project
 
