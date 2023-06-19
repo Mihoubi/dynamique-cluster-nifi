@@ -19,6 +19,15 @@ Schema of the whole architecture :
 
 !['datalake_architecture'](./doc/schemas/nifi_cluster.png)
 
+
+### Add users to the Nifi Cluster
+
+!['datalake_architecture'](./doc/schemas/add_users.png)
+
+### How to do promotion from environment to another onvironment CI/CD process with NIFI
+
+!['datalake_architecture'](./doc/schemas/promition_environment.png)
+
 ## Mandatory prerequisites for running
 
 You will need to install a few tools to make use of the project.
