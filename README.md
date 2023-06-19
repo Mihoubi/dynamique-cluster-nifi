@@ -1,4 +1,4 @@
-# Nifi Dynamic Cluster project : 
+# Nifi Dynamic Cluster project
 ## Infrastructure as Code
 
 This project gathers all the infrastructure as code and configuration management scripts for the Dev Nifi project
@@ -22,9 +22,12 @@ Schema of the whole architecture :
 
 ### Add users to the Nifi Cluster
 
+Schema explain how to add users :
 !['datalake_architecture'](./doc/schemas/add_users.png)
 
 ### How to do promotion from environment to another onvironment CI/CD process with NIFI
+
+Schema explain how to promote from environment to another environment 
 
 !['datalake_architecture'](./doc/schemas/promition_environment.png)
 
