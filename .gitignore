@@ -1,0 +1,12 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+*.p12
+/*.p12
+nifi.tfvars
+.terraform
+*playbooks/registry/id_rsa
+/playbooks/registry/id_rsa
+*playbooks/registry/id_rsa.pub
+/playbooks/registry/id_rsa.pub
+.idea

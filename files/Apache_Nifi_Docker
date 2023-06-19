@@ -1,0 +1,34 @@
+docker pull apache/nifi:latest
+docker run --name nifi -p 8443:8443 -e NIFI_WEB_HTTPS_PORT='8443' -d apache/nifi:latest
+docker logs -f nifi
+
+Start Nifi with your username and password :
+docker run --name nifi -p 8443:8443 -e SINGLE_USER_CREDENTIALS_USERNAME=admin -e SINGLE_USER_CREDENTIALS_PASSWORD=ctsBtRBKHRAx69EqUghvvgEvjnaLjFEB -d apache/nifi:latest
+
+Generated Username [af133371-6574-48e7-a73e-66462261eefc]
+Generated Password [TQFfkSrc5lyUs1kl9jJ2IDVk2agiH0N4]
+
+
+docker exec -it -u 0  nifi  bash
+
+export IP=$(hostname -I)
+
+
+sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+ apt install docker
+
+  apt install docker.io
+
+  docker-compose exec myapp-kafka /opt/bitnami/kafka/bin/kafka-topics.sh \
+    --create \
+    --bootstrap-server localhost:9092 \
+    --replication-factor 1 \
+    --partitions 1 \
+    --topic test
+
+
+    docker exec -it myapp-kafka /opt/bitnami/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic test
+
+    docker exec -it myapp-kafka /opt/bitnami/kafka/bin/kafka-console-consumer.sh --from-beginning --bootstrap-server localhost:9092 --topic test

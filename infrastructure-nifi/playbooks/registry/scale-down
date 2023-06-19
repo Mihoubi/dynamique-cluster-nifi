@@ -1,0 +1,52 @@
+#!/bin/bash
+# Gracefully exits node from cluster
+export JAVA_HOME=/usr/lib/jvm/default-java
+
+# various vars - the curl to 169.254.169.254 are AWS instance-specific API facts
+HOOKRESULT='CONTINUE'
+REGION=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
+INSTANCEID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+CLUSTERJSON=$(mktemp)
+S3BUCKET=$(cat /opt/nifi-conf/bucket)
+URLS3="s3://$S3BUCKET/nifi/registry/nifi-registry-primary.mv.db"
+
+# For NODEID/DISCONNECT/DISCONNECTED/OFFLOAD/OFFLOADED/DELETE/LCYCLE
+# the max attempts and target state
+MAX_ATTEMPTS=60
+SLEEP_INTERVAL=2
+TARGET_STATE="COMPLETE"
+
+
+# Get The Backup of the Nifi Registry
+sleep $SLEEP_INTERVAL
+cd /opt
+/usr/local/bin/aws s3 cp $URLS3 .
+chown nifi:nifi nifi-registry-primary.mv.db
+chmod 777 nifi-registry-primary.mv.db
+#cp nifi-registry-primary.mv.db /opt/nifi-registry-0.8.0/database/
+/usr/local/bin/aws s3 cp nifi-registry-primary.mv.db $URLS3
+
+# COMPLETE LIFECYCLE ACTION
+LCYCLE_ATTEMPTS=1
+LCYCLE_STATE="INCOMPLETE"
+while [[ $LCYCLE_ATTEMPTS -le $MAX_ATTEMPTS && $LCYCLE_STATE != $TARGET_STATE ]]
+do
+  /usr/local/bin/aws autoscaling complete-lifecycle-action --lifecycle-hook-name $LIFECYCLEHOOKNAME --auto-scaling-group-name $ASGNAME --lifecycle-action-result $HOOKRESULT --instance-id $INSTANCEID --region $REGION
+  if [ $? -eq 0 ]
+  then
+    LCYCLE_STATE=$TARGET_STATE
+  else
+    LCYCLE_ATTEMPTS=$(($LCYCLE_ATTEMPTS+1))
+    sleep $SLEEP_INTERVAL
+  fi
+done
+
+# EXIT IF LCYCLE FAILED
+echo ""
+if [[ $LCYCLE_STATE = $TARGET_STATE ]]
+then
+  echo "$(date) LIFECYCLE ACTION COMPLETE SENT AFTER $LCYCLE_ATTEMPTS, AWS TERMINATES INSTANCE."
+else
+  echo "$(date) LIFECYCLE ACTION COMPLETE FAILED AFTER $LCYCLE_ATTEMPTS, EXITING."
+  exit 1
+fi

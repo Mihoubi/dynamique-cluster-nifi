@@ -1,0 +1,680 @@
+---
+- name: zookeepers.yml
+  hosts: localhost
+  become: True
+  become_user: root
+  tasks:
+
+    - name: set zookeeper connection string
+      set_fact:
+        zookeeper_nodes: "{{ lb_dns }}:2173"
+
+    - name: fetch node_id
+      shell: |
+        cat /opt/node_id
+      register: node_id
+
+    - name: set host in hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ ansible_default_ipv4.address }} zk{{ node_id.stdout }} {{ ansible_nodename }}"
+        state: present
+
+    - name: nifi required packages
+      package:
+        name: "{{ packages }}"
+        state: latest
+      vars:
+        packages:
+        - default-jre
+        - jq
+        - python3-pip
+        - unzip
+      retries: 60
+      delay: 3
+      register: install_packages
+      until: install_packages is not failed
+
+    - name: arm required packages
+      package:
+        name: "{{ packages }}"
+        state: latest
+      vars:
+        packages:
+        - cmake
+        - default-jdk
+        - git
+      retries: 60
+      delay: 3
+      register: install_packages
+      until: install_packages is not failed
+      when: ansible_architecture == "aarch64"
+
+    - name: arm get snappy for build
+      get_url:
+        url: https://github.com/xerial/snappy-java/archive/refs/tags/1.1.8.4.tar.gz
+        dest: /opt/snappy-java.tar.gz
+      when: ansible_architecture == "aarch64"
+
+    - name: check snappy unarchived
+      stat:
+        path: /opt/snappy-java-1.1.8.4/README.md
+      register: snappy_unarchived
+
+    - name: nifi user
+      user:
+        name: nifi
+        comment: Apache NiFi Service Account
+
+    - name: unarchive snappy if not unarchived
+      unarchive:
+        src: /opt/snappy-java.tar.gz
+        dest: /opt
+        remote_src: yes
+        owner: nifi
+        group: nifi
+      when:
+        - ansible_architecture == "aarch64"
+        - snappy_unarchived.stat.exists == false
+
+    - name: arm make snappy
+      make:
+        chdir: /opt/snappy-java-1.1.8.4
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+      when: ansible_architecture == "aarch64"
+
+    - name: arm find snappy jar
+      find:
+        paths: /opt/snappy-java-1.1.8.4
+        recurse: yes
+        patterns: "snappy-java-*.jar"
+      register: snappy_jar
+      when: ansible_architecture == "aarch64"
+
+    - name: ansible required packages
+      pip:
+        executable: /usr/bin/pip3
+        name: "{{ packages }}"
+      vars:
+        packages:
+        - awscli
+        - boto
+        - boto3
+        - botocore
+        - cryptography
+        - pyOpenSSL
+
+    - name: get secret
+      set_fact:
+        nifi_secret: "{{ lookup('aws_ssm', name_prefix + '-nifi-secret-' + name_suffix, decrypt=True, region=aws_region) }}"
+      no_log: True
+
+    - name: set secret absent
+      file:
+        state: absent
+        path: /opt/nifi-conf/nifi_secret
+
+    - name: cloudwatch user
+      user:
+        name: cloudwatch
+        comment: AWS Cloudwatch Agent Service Account
+        groups: adm,nifi
+        append: yes
+
+    - name: cloudwatch agent download
+      get_url:
+        url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/{% if ansible_architecture == "x86_64" %}amd64{% elif ansible_architecture == "aarch64" %}arm64{% endif %}/latest/amazon-cloudwatch-agent.deb
+        dest: /opt/amazon-cloudwatch-agent.deb
+
+    - name: cloudwatch agent install
+      apt:
+        deb: /opt/amazon-cloudwatch-agent.deb
+        state: present
+
+    - name: cloudwatch conf
+      file:
+        path: /opt/aws/amazon-cloudwatch-agent/etc
+        state: directory
+        mode: 0755
+        owner: cloudwatch
+        group: cloudwatch
+
+    - name: cloudwatch conf file
+      template:
+        src: amazon-cloudwatch-agent.json
+        dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+        owner: cloudwatch
+        group: cloudwatch
+        mode: '0440'
+
+    - name: cloudwatch agent load configuration file
+      shell: |
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+    - name: set route53 record
+      route53:
+        state: present
+        overwrite: yes
+        private_zone: yes
+        zone: "{{ name_prefix }}{{ name_suffix }}.internal"
+        record: "zk{{ node_id.stdout }}.{{ name_prefix }}{{ name_suffix }}.internal"
+        type: A
+        ttl: 600
+        value:
+          - "{{ ansible_default_ipv4.address }}"
+        wait: yes
+      retries: 30
+      delay: 2
+      register: route53_record
+      until: route53_record is not failed
+
+    - name: nifi management directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: nifi
+        group: nifi
+        mode: 0750
+      with_items:
+        - /opt/nifi-certificates
+        - /opt/nifi-conf
+        - /opt/nifi-downloads
+        - /opt/nifi-certificates/ca
+        - /opt/nifi-certificates/admin
+        - /opt/nifi-certificates/{{ ansible_nodename }}
+
+    - name: set secret
+      lineinfile:
+        path: /opt/nifi-conf/nifi_secret
+        line: "{{ nifi_secret }}"
+        owner: nifi
+        group: nifi
+        mode: '0400'
+        create: yes
+
+    - name: remove any previous bucket or kms key id file (for dynamic changes)
+      file:
+        path: /opt/nifi-conf/{{ item }}
+        state: absent
+      with_items:
+        - bucket
+        - kms-key-id
+
+    - name: set bucket in conf
+      lineinfile:
+        line: "{{ s3_bucket }}"
+        path: /opt/nifi-conf/bucket
+        owner: nifi
+        group: nifi
+        mode: 0640
+        create: yes
+
+    - name: set kms key id in conf
+      lineinfile:
+        line: "{{ kms_key_id }}"
+        path: /opt/nifi-conf/kms-key-id
+        owner: nifi
+        group: nifi
+        mode: 0640
+        create: yes
+
+    - name: check zookeeper downloaded
+      stat:
+        path: /opt/nifi-downloads/zookeeper.tar.gz
+      register: zk_downloaded
+
+    - name: check nifi downloaded
+      stat:
+        path: /opt/nifi-downloads/nifi.zip
+      register: nifi_downloaded
+
+    - name: check toolkit downloaded
+      stat:
+        path: /opt/nifi-downloads/nifi-toolkit.zip
+      register: toolkit_downloaded
+
+    - name: download zk from s3 if not downloaded
+      aws_s3:
+        region: "{{ aws_region }}"
+        mode: get
+        bucket: "{{ s3_bucket }}"
+        object: "nifi/downloads/{{ item }}"
+        dest: "/opt/nifi-downloads/{{ item }}"
+      with_items:
+        - zookeeper.tar.gz
+      become_user: nifi
+      when:
+        - zk_downloaded.stat.exists == false
+      retries: 300
+      delay: 2
+      register: zk_from_s3
+      until: zk_from_s3 is not failed
+
+    - name: download nifi from s3 if not downloaded
+      aws_s3:
+        region: "{{ aws_region }}"
+        mode: get
+        bucket: "{{ s3_bucket }}"
+        object: "nifi/downloads/{{ item }}"
+        dest: "/opt/nifi-downloads/{{ item }}"
+      with_items:
+        - nifi.zip
+      become_user: nifi
+      when:
+        - nifi_downloaded.stat.exists == false
+      retries: 900
+      delay: 2
+      register: nifi_from_s3
+      until: nifi_from_s3 is not failed
+
+    - name: download toolkit from s3 if not downloaded
+      aws_s3:
+        region: "{{ aws_region }}"
+        mode: get
+        bucket: "{{ s3_bucket }}"
+        object: "nifi/downloads/{{ item }}"
+        dest: "/opt/nifi-downloads/{{ item }}"
+      with_items:
+        - nifi-toolkit.zip
+      become_user: nifi
+      when:
+        - toolkit_downloaded.stat.exists == false
+      retries: 300
+      delay: 2
+      register: toolkit_from_s3
+      until: toolkit_from_s3 is not failed
+
+    - name: check zookeeper unarchived
+      stat:
+        path: /opt/zookeeper-{{ zk_version }}/LICENSE.txt
+      register: zk_unarchived
+
+    - name: unarchive zookeeper if not unarchived
+      unarchive:
+        src: /opt/nifi-downloads/zookeeper.tar.gz
+        dest: /opt
+        remote_src: yes
+        owner: nifi
+        group: nifi
+      when: zk_unarchived.stat.exists == false
+
+    - name: recursive chown zookeeper
+      file:
+        path: /opt/zookeeper-{{ zk_version }}
+        state: directory
+        recurse: yes
+        owner: nifi
+        group: nifi
+
+    - name: link zookeeper version to /opt/zookeeper
+      file:
+        src: /opt/apache-zookeeper-{{ zk_version }}-bin
+        path: /opt/zookeeper
+        state: link
+        mode: 0755
+        owner: nifi
+        group: nifi
+
+    - name: check nifi unarchived
+      stat:
+        path: /opt/nifi-{{ nifi_version }}/LICENSE
+      register: nifi_unarchived
+
+    - name: unarchive nifi when not unarchived
+      unarchive:
+        src: /opt/nifi-downloads/nifi.zip
+        dest: /opt
+        remote_src: yes
+        owner: nifi
+        group: nifi
+      when: nifi_unarchived.stat.exists == false
+
+    - name: recursive chown nifi
+      file:
+        path: /opt/nifi-{{ nifi_version }}
+        state: directory
+        recurse: yes
+        owner: nifi
+        group: nifi
+
+    - name: link nifi version to /opt/nifi
+      file:
+        src: /opt/nifi-{{ nifi_version }}
+        path: /opt/nifi
+        state: link
+        mode: 0755
+        owner: nifi
+        group: nifi
+
+    - name: arm copy snappy jar to nifi
+      copy:
+        src: "{{ item.path }}"
+        dest: /opt/nifi/lib/
+        owner: nifi
+        group: nifi
+        remote_src: yes
+      with_items: "{{ snappy_jar.files }}"
+      when: ansible_architecture == "aarch64"
+
+    - name: check toolkit unarchived
+      stat:
+        path: /opt/nifi-toolkit-{{ nifi_version }}/LICENSE
+      register: toolkit_unarchived
+
+    - name: unarchive toolkit when not unarchived
+      unarchive:
+        src: /opt/nifi-downloads/nifi-toolkit.zip
+        dest: /opt
+        remote_src: yes
+        owner: nifi
+        group: nifi
+      when: toolkit_unarchived.stat.exists == false
+
+    - name: recursive chown toolkit
+      file:
+        path: /opt/nifi-toolkit-{{ nifi_version }}
+        state: directory
+        recurse: yes
+        owner: nifi
+        group: nifi
+
+    - name: link toolkit version to /opt/nifi-toolkit
+      file:
+        src: /opt/nifi-toolkit-{{ nifi_version }}
+        path: /opt/nifi-toolkit
+        state: link
+        mode: 0755
+        owner: nifi
+        group: nifi
+
+    - name: authorizers.xml
+      template:
+        src: authorizers.xml
+        dest: /opt/nifi/conf/authorizers.xml
+        owner: nifi
+        group: nifi
+        mode: 0640
+
+    - name: zookeeper systemd unit file
+      copy:
+        src: zookeeper.service
+        dest: /etc/systemd/system/zookeeper.service
+        mode: 0444
+        owner: root
+        group: root
+
+    - name: bootstrap.conf
+      template:
+        src: bootstrap.conf
+        dest: /opt/nifi/conf/bootstrap.conf
+        owner: nifi
+        group: nifi
+        mode: 0640
+      register: nifi_bootstrap_conf_file
+
+    - name: nifi properties
+      template:
+        src: nifi.properties
+        dest: /opt/nifi/conf/nifi.properties
+        owner: nifi
+        group: nifi
+        mode: 0640
+      register: nifi_properties_file
+
+    - name: logback.xml
+      template:
+        src: logback.xml
+        dest: /opt/nifi/conf/logback.xml
+        owner: nifi
+        group: nifi
+        mode: 0640
+      register: nifi_log_file
+
+    - name: connect string in state-management
+      lineinfile:
+        path: /opt/nifi/conf/state-management.xml
+        regexp: '        <property name="Connect String">.*</property>'
+        line: '        <property name="Connect String">{{ lb_dns }}:2173</property>'
+
+    - name: check ca exists
+      stat:
+        path: /opt/nifi-certificates/ca/ca.pem
+      register: ca_cert
+
+    - name: get ca from s3
+      aws_s3:
+        region: "{{ aws_region }}"
+        mode: get
+        bucket: "{{ s3_bucket }}"
+        object: "nifi/certificates/ca/{{ item }}"
+        dest: "/opt/nifi-certificates/ca/{{ item }}"
+      with_items:
+        - ca.pem
+        - ca.key
+      retries: 900
+      delay: 2
+      register: ca_from_s3
+      until: ca_from_s3 is not failed
+      become_user: nifi
+      when: 
+        - ca_cert.stat.exists == false
+
+    - name: check admin exists
+      stat:
+        path: /opt/nifi-certificates/admin/keystore.p12
+      register: admin_cert
+
+    - name: get admin from s3
+      aws_s3:
+        region: "{{ aws_region }}"
+        mode: get
+        bucket: "{{ s3_bucket }}"
+        object: "nifi/certificates/admin/{{ item }}"
+        dest: "/opt/nifi-certificates/admin/{{ item }}"
+      with_items:
+        - keystore.p12
+        - private_key.key
+        - admin_cert.pem
+      retries: 900
+      delay: 2
+      register: admin_from_s3
+      until: admin_from_s3 is not failed
+      become_user: nifi
+      when: 
+        - admin_cert.stat.exists == false
+
+    - name: admin cli.properties template
+      template:
+        src: cli.properties
+        dest: /opt/nifi-certificates/admin/cli.properties
+        owner: nifi
+        group: nifi
+        mode: 0640
+
+    - name: check node keystore exists
+      stat:
+        path: /opt/nifi-certificates/{{ ansible_nodename }}/node.p12
+      register: node_cert
+
+    - name: generate node private key when no keystore
+      community.crypto.openssl_privatekey:
+        path: /opt/nifi-certificates/{{ ansible_nodename }}/node.key
+        owner: nifi
+        group: nifi
+        type: RSA
+        cipher: auto
+        passphrase: "{{ nifi_secret }}"
+        select_crypto_backend: cryptography
+      when: node_cert.stat.exists == false
+
+    - name: generate node public key when no keystore
+      community.crypto.openssl_publickey:
+        path: /opt/nifi-certificates/{{ ansible_nodename }}/node.pem
+        owner: nifi
+        group: nifi
+        format: PEM
+        privatekey_path: /opt/nifi-certificates/{{ ansible_nodename }}/node.key
+        privatekey_passphrase: "{{ nifi_secret }}"
+        select_crypto_backend: cryptography
+      when: node_cert.stat.exists == false
+
+    - name: generate node csr when no keystore
+      community.crypto.openssl_csr:
+        path: /opt/nifi-certificates/{{ ansible_nodename }}/node.csr
+        owner: nifi
+        group: nifi
+        privatekey_path: /opt/nifi-certificates/{{ ansible_nodename }}/node.key
+        privatekey_passphrase: "{{ nifi_secret }}"
+        common_name: "{{ ansible_nodename }}"
+        organizational_unit_name: "NIFI"
+        subject_alt_name: "DNS:{{ lb_dns }},DNS:{{ ansible_nodename }}"
+        select_crypto_backend: cryptography
+        key_usage:
+          - digitalSignature
+          - nonRepudiation
+          - keyEncipherment
+          - dataEncipherment
+          - keyAgreement
+        extended_key_usage:
+          - serverAuth
+          - clientAuth
+      when: node_cert.stat.exists == false
+
+    - name: generate node certificate when no keystore
+      community.crypto.x509_certificate:
+        path: /opt/nifi-certificates/{{ ansible_nodename }}/node.pem
+        owner: nifi
+        group: nifi
+        csr_path: /opt/nifi-certificates/{{ ansible_nodename }}/node.csr
+        ownca_path: /opt/nifi-certificates/ca/ca.pem
+        ownca_privatekey_path: /opt/nifi-certificates/ca/ca.key
+        ownca_privatekey_passphrase: "{{ nifi_secret }}"
+        provider: ownca
+        select_crypto_backend: cryptography
+      when: node_cert.stat.exists == false
+
+    - name: generate node pkcs12 keystore when no keystore
+      community.crypto.openssl_pkcs12:
+        action: export
+        path: /opt/nifi-certificates/{{ ansible_nodename }}/node.p12
+        owner: nifi
+        group: nifi
+        friendly_name: "{{ ansible_nodename }}"
+        privatekey_path: /opt/nifi-certificates/{{ ansible_nodename }}/node.key
+        privatekey_passphrase: "{{ nifi_secret }}"
+        certificate_path: /opt/nifi-certificates/{{ ansible_nodename }}/node.pem
+        passphrase: "{{ nifi_secret }}"
+      when: node_cert.stat.exists == false
+
+    - name: create empty truststore when no keystore
+      shell: |
+        keytool -genkeypair -alias none -storepass "{{ nifi_secret }}" -keypass "{{ nifi_secret }}" -keystore /opt/nifi-certificates/ca/trust.jks -dname "CN=none"
+        keytool -delete -alias none -storepass "{{ nifi_secret }}" -keystore /opt/nifi-certificates/ca/trust.jks
+      become_user: nifi
+      no_log: True
+      when: node_cert.stat.exists == false
+
+    - name: add ca to jks truststore when no keystore
+      community.general.java_cert:
+        cert_alias: "NIFICA"
+        cert_path: /opt/nifi-certificates/ca/ca.pem
+        keystore_path: /opt/nifi-certificates/ca/trust.jks
+        keystore_pass: "{{ nifi_secret }}"
+        trust_cacert: yes
+      when: node_cert.stat.exists == false
+
+    - name: link node cert dir to /opt/nifi-certificates/node
+      file:
+        src: /opt/nifi-certificates/{{ ansible_nodename }}
+        path: /opt/nifi-certificates/node
+        state: link
+        mode: 0755
+        owner: nifi
+        group: nifi
+
+    - name: zookeeper data directory
+      file:
+        path: /opt/zookeeper/data
+        state: directory
+        mode: 0755
+        owner: nifi
+        group: nifi
+
+    - name: zookeeper myid file
+      template:
+        src: myid
+        dest: /opt/zookeeper/data/myid
+        owner: nifi
+        group: nifi
+        mode: 0444
+
+    - name: zookeeper conf file
+      template:
+        src: zoo.cfg
+        dest: /opt/zookeeper/conf/zoo.cfg
+        owner: nifi
+        group: nifi
+        mode: 0640
+      register: zk_conf_file
+
+    - name: zookeeper log file
+      template:
+        src: zklog4j.properties
+        dest: /opt/zookeeper/conf/log4j.properties
+        owner: nifi
+        group: nifi
+        mode: 0640
+      register: zk_log_file
+
+    - name: zookeeper systemd service start/enable
+      systemd:
+        state: "{% if zk_conf_file.changed or zk_log_file.changed %}restarted{% else %}started{% endif %}"
+        enabled: yes
+        name: zookeeper
+        daemon_reload: yes
+
+    - name: copy admin-operate and scale-down script
+      template:
+        src: "{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: nifi
+        group: nifi
+        mode: 0550
+      with_items:
+        - admin-operate
+        - scale-down
+
+    - name: timers and service units
+      copy:
+        src: "{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: 0640
+      with_items:
+        - nifi.service
+        - nifi.timer
+
+    - name: stepped sleep to ensure one node stays up
+      pause:
+        minutes: "{{ (node_id.stdout | int) - 1 }}"
+      when: nifi_properties_file.changed or nifi_log_file.changed or nifi_bootstrap_conf_file.changed
+
+    - name: nifi systemd
+      systemd:
+        name: "nifi.{{ item }}"
+        daemon_reload: yes
+        state: "{% if nifi_properties_file.changed or nifi_log_file.changed or nifi_bootstrap_conf_file.changed %}restarted{% else %}started{% endif %}"
+        enabled: yes
+      with_items:
+        - service
+        - timer
+
+    - name: run admin-operate script
+      shell: |
+        /usr/local/bin/admin-operate
+      retries: 120
+      delay: 5
+      register: admin_operate
+      until: admin_operate is not failed

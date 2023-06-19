@@ -1,0 +1,14 @@
+---
+services:
+        kafka-ui:
+                image: provectuslabs/kafka-ui
+                container_name: kafka-ui
+                ports:
+                        - "8080:8080"
+                restart: always
+                environment:
+                        - KAFKA_CLUSTERS_0_NAME=msk-euw3-prod-infra-cluster-01
+                        - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=54.167.82.48:9092
+                        - KAFKA_CLUSTERS_0_ZOOKEEPER="54.167.82.48:2182"
+                        - KAFKA_CLUSTERS_0_READONLY=true
+                        - KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL=SSL
